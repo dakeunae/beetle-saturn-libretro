@@ -1,10 +1,10 @@
-name: Beetle Saturn Android arm64 rollback
+name: Beetle Saturn Android arm64 rollback (fixed)
 
 on:
   workflow_dispatch:
     inputs:
       cutoff_utc:
-        description: 'Select most recent commit before this UTC timestamp'
+        description: 'Last commit before UTC date (e.g. 2026-10-10T00:00:00Z)'
         required: true
         default: '2026-10-10T00:00:00Z'
 
@@ -14,49 +14,60 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
-      - name: Checkout full history
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Select historical commit
-        id: revision
+      - name: Select old source revision
         shell: bash
+        env:
+          CUTOFF: ${{ inputs.cutoff_utc }}
         run: |
           set -euo pipefail
-          COMMIT="$(git rev-list -1 --before='${{ inputs.cutoff_utc }}' HEAD)"
-          if [[ -z "$COMMIT" ]]; then echo 'No matching revision'; exit 1; fi
+          COMMIT="$(git rev-list -1 --before="$CUTOFF" HEAD)"
+          if [ -z "$COMMIT" ]; then echo 'No historical commit found'; exit 1; fi
           git checkout --detach "$COMMIT"
           git submodule update --init --recursive
-          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           git show -s --format='%H %cI %s' HEAD | tee selected-revision.txt
-      - name: Configure NDK
+          test -f jni/Android.mk || { echo 'jni/Android.mk not found in selected revision'; exit 1; }
+      - name: Find installed Android NDK
         shell: bash
         run: |
           set -euo pipefail
-          NDK="$(find "$ANDROID_SDK_ROOT/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
-          if [[ -z "$NDK" ]]; then echo 'Android NDK not found'; exit 1; fi
+          test -d "${ANDROID_SDK_ROOT}/ndk"
+          NDK="$(find "${ANDROID_SDK_ROOT}/ndk" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          test -x "$NDK/ndk-build"
           echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
-          "$NDK/ndk-build" --version || true
-      - name: Compile Android arm64
+          echo "Using Android NDK: $NDK"
+      - name: Compile arm64 core
         shell: bash
         run: |
-          set -euo pipefail
-          "$NDK_HOME/ndk-build" -j 2 NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=jni/Android.mk APP_ABI=arm64-v8a APP_PLATFORM=android-21 NDK_OUT="$RUNNER_TEMP/obj" NDK_LIBS_OUT="$RUNNER_TEMP/libs" V=0
-          find "$RUNNER_TEMP/libs" -type f -name '*.so' -print
-          SO="$(find "$RUNNER_TEMP/libs/arm64-v8a" -maxdepth 1 -type f -name '*.so' | head -1)"
-          test -n "$SO"
+          set -o pipefail
+          "$NDK_HOME/ndk-build" -j 2 NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=jni/Android.mk APP_ABI=arm64-v8a APP_PLATFORM=android-21 NDK_OUT="$RUNNER_TEMP/obj" NDK_LIBS_OUT="$RUNNER_TEMP/libs" V=0 2>&1 | tee compile.log
           mkdir -p release
+          SO="$(find "$RUNNER_TEMP/libs/arm64-v8a" -maxdepth 1 -type f -name '*.so' -print -quit)"
+          if [ -z "$SO" ]; then echo 'ERROR: no compiled shared library found'; exit 1; fi
           cp "$SO" release/mednafen_saturn_libretro_android.so
           cp selected-revision.txt release/
           file release/mednafen_saturn_libretro_android.so | tee release/binary-info.txt
           test -s release/mednafen_saturn_libretro_android.so
-      - name: Publish downloadable core
+      - name: Upload core
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: beetle-saturn-arm64-before-${{ inputs.cutoff_utc }}
+          name: beetle-saturn-android-arm64-rollback
           path: release/
           if-no-files-found: error
           retention-days: 14
+      - name: Upload diagnostic logs if failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beetle-saturn-build-errors
+          path: |
+            compile.log
+            selected-revision.txt
+          if-no-files-found: warn
