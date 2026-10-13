@@ -33,6 +33,28 @@ jobs:
           git submodule update --init --recursive
           git show -s --format='%H %cI %s' HEAD | tee selected-revision.txt
           test -f jni/Android.mk || { echo 'jni/Android.mk not found in selected revision'; exit 1; }
+      - name: Restore missing CHD dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          REQUIRED="deps/libchdr/src/libchdr_bitstream.c"
+          if [ ! -f "$REQUIRED" ]; then
+            echo "Historical tree is missing $REQUIRED; fetching libchdr sources"
+            mkdir -p deps
+            if [ -d deps/libchdr ]; then
+              mv deps/libchdr "${RUNNER_TEMP}/incomplete-libchdr"
+            fi
+            git clone --depth 1 https://github.com/rtissera/libchdr.git deps/libchdr
+          fi
+          if [ ! -f "$REQUIRED" ]; then
+            echo "ERROR: CHD source file still missing: $REQUIRED" >&2
+            exit 1
+          fi
+          echo "CHD source exists: $REQUIRED"
+          echo "libchdr commit: $(git -C deps/libchdr rev-parse --short HEAD 2>/dev/null || echo bundled)"
+          # Show remaining missing source files before invoking the NDK.
+          echo 'Checking historical Makefile sources:'
+          grep -n 'DEPS_DIR\|libchdr' Makefile.common | head -70 || true
       - name: Find installed Android NDK
         shell: bash
         run: |
