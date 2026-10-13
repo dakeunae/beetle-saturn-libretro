@@ -55,6 +55,28 @@ jobs:
           # Show remaining missing source files before invoking the NDK.
           echo 'Checking historical Makefile sources:'
           grep -n 'DEPS_DIR\|libchdr' Makefile.common | head -70 || true
+      - name: Correct NDK source paths in Android.mk
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          mk = Path('jni/Android.mk')
+          text = mk.read_text()
+          old = '$(sort $(SOURCES_CXX) $(SOURCES_C))'
+          # NDK prepends LOCAL_PATH to LOCAL_SRC_FILES; source entries
+          # already start with LOCAL_PATH/.., causing jni/jni/../deps.
+          # Strip LOCAL_PATH/ to turn jni/../deps into ../deps.
+          new = '$(patsubst $(LOCAL_PATH)/%,%,$(sort $(SOURCES_CXX) $(SOURCES_C)))'
+          if new in text:
+              print('Source path normalization already present')
+          elif old in text:
+              mk.write_text(text.replace(old, new, 1))
+              print('Patched Android.mk source list')
+          else:
+              raise SystemExit('Could not find LOCAL_SRC_FILES assignment; inspect Android.mk before building')
+          PYFIX
+          grep -n 'LOCAL_SRC_FILES' jni/Android.mk
       - name: Find installed Android NDK
         shell: bash
         run: |
